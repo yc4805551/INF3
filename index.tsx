@@ -121,8 +121,11 @@ const callGenerativeAi = async (provider: ModelProvider, systemInstruction: stri
       let responseText: string;
 
       if (provider === 'gemini') {
-        // FIX: Updated to use process.env.API_KEY for Gemini API key as per SDK guidelines.
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+        const geminiApiKey = process.env.API_KEY;
+        if (!geminiApiKey || geminiApiKey.trim() === '' || geminiApiKey === 'undefined') {
+            throw new Error("Gemini API key 未配置。请在您的 .env 文件中设置 VITE_GEMINI_API_KEY 变量。如果部署在 GitHub Pages, 请确保已在仓库的 Secrets 中正确配置 VITE_GEMINI_API_KEY。");
+        }
+        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
         const config: any = { systemInstruction };
 
         if (jsonResponse) {
@@ -265,8 +268,11 @@ const callGenerativeAiStream = async (
         }
 
         if (provider === 'gemini') {
-            // FIX: Updated to use process.env.API_KEY for Gemini API key as per SDK guidelines.
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+            const geminiApiKey = process.env.API_KEY;
+            if (!geminiApiKey || geminiApiKey.trim() === '' || geminiApiKey === 'undefined') {
+                throw new Error("Gemini API key 未配置。请在您的 .env 文件中设置 VITE_GEMINI_API_KEY 变量。如果部署在 GitHub Pages, 请确保已在仓库的 Secrets 中正确配置 VITE_GEMINI_API_KEY。");
+            }
+            const ai = new GoogleGenAI({ apiKey: geminiApiKey });
             const config: any = { systemInstruction };
             
             if (thinkingBudget !== undefined) {

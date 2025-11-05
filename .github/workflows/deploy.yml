@@ -43,7 +43,7 @@ jobs:
         env: 
           # 1. 添加 Gemini Key
           VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
-
+     
           # 2. 添加你新创建的 DeepSeek Secrets
           VITE_DEEPSEEK_API_KEY: ${{ secrets.VITE_DEEPSEEK_API_KEY }}
           VITE_DEEPSEEK_ENDPOINT: ${{ secrets.VITE_DEEPSEEK_ENDPOINT }}

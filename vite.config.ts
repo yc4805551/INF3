@@ -4,6 +4,7 @@ import { ServerResponse } from 'http';
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  base: '/INF3/',
   plugins: [react()],
   server: {
     watch: {

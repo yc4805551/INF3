@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
-import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
+import { Type } from "@google/genai";
 import mammoth from 'mammoth';
 import { marked } from 'marked';
+
+const API_BASE_URL = import.meta.env.PROD
+  ? import.meta.env.VITE_API_BASE_URL
+  : '/api';
 
 // FIX: Modified debounce to return a function with a `clearTimeout` method to cancel pending calls.
 const debounce = <F extends (...args: any[]) => any>(func: F, waitFor: number) => {
@@ -72,34 +76,6 @@ type ChatMessage = {
   resultData?: NoteAnalysis;
 };
 
-// NEW: Helper to get model endpoint/name from environment variables
-const getModelConfig = (provider: ModelProvider) => {
-    switch (provider) {
-        case 'openai':
-            return {
-                endpoint: process.env.OPENAI_ENDPOINT!,
-                model: process.env.OPENAI_MODEL!,
-                providerName: 'OpenAI'
-            };
-        case 'deepseek':
-            return {
-                endpoint: process.env.DEEPSEEK_ENDPOINT!,
-                model: process.env.DEEPSEEK_MODEL!,
-                providerName: 'DeepSeek'
-            };
-        case 'ali':
-            return {
-                endpoint: process.env.ALI_ENDPOINT!,
-                model: process.env.ALI_MODEL!,
-                providerName: 'Ali'
-            };
-        default:
-            // This case should not be hit due to checks in calling functions
-            return { endpoint: '', model: '', providerName: provider };
-    }
-};
-
-
 // State for multi-model audit results
 // FIX: Defined an interface for a single audit result to provide strong typing
 // for what was previously an anonymous object structure, resolving 'unknown' type errors.
@@ -113,134 +89,33 @@ type AuditResults = {
     [key in ModelProvider]?: AuditResult
 };
 
-const callGenerativeAi = async (provider: ModelProvider, systemInstruction: string, userPrompt: string, jsonResponse: boolean, apiKeys: {[key in ModelProvider]?: string}, mode: 'notes' | 'audit' | 'roaming' | 'writing' | null, history: ChatMessage[] = [], responseSchema?: any) => {
+const callGenerativeAi = async (provider: ModelProvider, systemInstruction: string, userPrompt: string, jsonResponse: boolean, mode: 'notes' | 'audit' | 'roaming' | 'writing' | null, history: ChatMessage[] = []) => {
   const retries = 2; // 1 initial attempt + 2 retries
 
   for (let i = 0; i <= retries; i++) {
     try {
-      let responseText: string;
-
-      if (provider === 'gemini') {
-        const geminiApiKey = process.env.API_KEY;
-        if (!geminiApiKey || geminiApiKey.trim() === '' || geminiApiKey === 'undefined') {
-            throw new Error("Gemini API key 未配置。请在您的 .env 文件中设置 VITE_GEMINI_API_KEY 变量。如果部署在 GitHub Pages, 请确保已在仓库的 Secrets 中正确配置 VITE_GEMINI_API_KEY。");
+      const response = await fetch(`${API_BASE_URL}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, systemInstruction, userPrompt, jsonResponse, mode, history })
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => response.statusText);
+        let userFriendlyError = `后端代理服务出错 (状态码: ${response.status})。请检查后端服务日志。`;
+        if (response.status >= 500 && response.status < 600) {
+            userFriendlyError += ` 这可能是由于后端无法连接到上游AI服务导致的。`;
         }
-        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-        const config: any = { systemInstruction };
-
-        if (jsonResponse) {
-          config.responseMimeType = "application/json";
-          if (responseSchema) {
-            config.responseSchema = responseSchema;
-          } else if (mode === 'notes') {
-            config.responseSchema = { type: Type.OBJECT, properties: { organizedText: { type: Type.STRING }, userThoughts: { type: Type.STRING } } };
-          } else if (mode === 'roaming') {
-            config.responseSchema = { type: Type.OBJECT, properties: { conclusion: { type: Type.STRING } } };
-          } else if (mode === 'audit') {
-            config.responseSchema = {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        problematicText: { type: Type.STRING },
-                        suggestion: { type: Type.STRING },
-                        checklistItem: { type: Type.STRING },
-                        explanation: { type: Type.STRING },
-                    }
-                }
-            };
-          } else if (mode === 'writing') {
-             config.responseSchema = {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        originalText: { type: Type.STRING },
-                        revisedText: { type: Type.STRING },
-                        explanation: { type: Type.STRING },
-                    }
-                }
-            };
-          }
-        }
-        
-        const fullContents = [...history.filter(h => h.parts && h.parts.length > 0), { role: 'user', parts: [{ text: userPrompt }] }];
-        const contentsForApi = fullContents.map(({ role, parts }) => ({ role, parts }));
-        
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: contentsForApi,
-          config: config
-        });
-        responseText = response.text ?? '';
-
-      } else if (provider === 'openai' || provider === 'deepseek' || provider === 'ali') {
-        const { endpoint, model, providerName } = getModelConfig(provider);
-        if (!endpoint || !model) {
-            throw new Error(`Configuration for provider ${provider} is missing. Please check your .env file.`);
-        }
-        
-        const transformedHistory = history.filter(h => h.parts && h.parts.length > 0).map(msg => ({
-          role: msg.role === 'model' ? 'assistant' : 'user',
-          content: msg.parts[0].text
-        }));
-
-        const body: any = {
-            model,
-            messages: [{ role: 'system', content: systemInstruction }, ...transformedHistory, { role: 'user', content: userPrompt }],
-            max_tokens: 4096
-        };
-        if (jsonResponse) {
-            body.response_format = { type: 'json_object' };
-        }
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKeys[provider]}`
-            },
-            body: JSON.stringify(body)
-        });
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorMessage = errorText;
-
-            if (response.status >= 500 && response.status < 600) {
-                 errorMessage = `代理服务器连接失败 (状态码: ${response.status})。这通常是由于网络问题、VPN配置错误或目标API服务暂时不可用导致的。请检查您的网络连接并重试。`;
-            } else if (errorText) {
-                try {
-                    const errorJson = JSON.parse(errorText);
-                    errorMessage = errorJson.error?.message || errorMessage;
-                } catch (e) { /* Ignore if parsing fails */ }
-            }
-            throw new Error(`${providerName} API 错误: ${response.status} ${response.statusText} - ${errorMessage}`);
-        }
-        const responseBodyText = await response.text();
-        if (!responseBodyText) {
-          throw new Error(`${providerName} returned an empty response.`);
-        }
-        try {
-            const data = JSON.parse(responseBodyText);
-            if (!data.choices || data.choices.length === 0 || !data.choices[0].message) {
-                 throw new Error(`Invalid response structure from ${providerName}`);
-            }
-            responseText = data.choices[0].message.content;
-        } catch (e: any) {
-            console.error(`Error parsing JSON from ${providerName}:`, responseBodyText);
-            throw new Error(`Failed to parse JSON from ${providerName}: ${e.message}`);
-        }
-
-      } else {
-        throw new Error(`Unsupported provider: ${provider}`);
+        console.error("Backend raw error:", errorText);
+        throw new Error(userFriendlyError);
       }
-
-      return responseText;
+      return await response.text();
 
     } catch (error) {
       console.error(`Attempt ${i + 1} failed for ${provider}:`, error);
       if (i === retries) {
         if (error instanceof TypeError && error.message.toLowerCase().includes('failed to fetch')) {
-             throw new Error(`网络请求失败。这可能是由于 CORS 策略、网络连接中断或代理服务器配置错误。请检查浏览器开发者工具中的网络(Network)和控制台(Console)选项卡以获取详细信息。`);
+             throw new Error(`网络请求失败。无法连接到后端服务(${API_BASE_URL})。请检查网络连接、VPN配置或确认后端服务正在运行。`);
         }
         throw error; // Re-throw the last error
       }
@@ -255,7 +130,6 @@ const callGenerativeAiStream = async (
     provider: ModelProvider,
     systemInstruction: string,
     userPrompt: string,
-    apiKeys: { [key in ModelProvider]?: string },
     history: ChatMessage[],
     onChunk: (textChunk: string) => void,
     onComplete: () => void,
@@ -263,111 +137,28 @@ const callGenerativeAiStream = async (
     thinkingBudget?: number,
 ) => {
     try {
-        if (provider !== 'gemini' && !apiKeys[provider]) {
-            throw new Error(`API key for ${provider} is missing.`);
+        const response = await fetch(`${API_BASE_URL}/generate-stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, systemInstruction, userPrompt, history, thinkingBudget })
+        });
+
+        if (!response.ok || !response.body) {
+             const errorText = await response.text().catch(() => `Status: ${response.status}`);
+             throw new Error(`后端流式传输错误: ${errorText}`);
         }
-
-        if (provider === 'gemini') {
-            const geminiApiKey = process.env.API_KEY;
-            if (!geminiApiKey || geminiApiKey.trim() === '' || geminiApiKey === 'undefined') {
-                throw new Error("Gemini API key 未配置。请在您的 .env 文件中设置 VITE_GEMINI_API_KEY 变量。如果部署在 GitHub Pages, 请确保已在仓库的 Secrets 中正确配置 VITE_GEMINI_API_KEY。");
-            }
-            const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-            const config: any = { systemInstruction };
-            
-            if (thinkingBudget !== undefined) {
-              config.thinkingConfig = { thinkingBudget };
-            }
-            
-            const fullContents = [...history.filter(h => h.parts && h.parts.length > 0), { role: 'user', parts: [{ text: userPrompt }] }];
-            const contentsForApi = fullContents.map(({ role, parts }) => ({ role, parts }));
-
-            const responseStream = await ai.models.generateContentStream({
-                model: 'gemini-2.5-flash',
-                contents: contentsForApi,
-                config: config
-            });
-
-            for await (const chunk of responseStream) {
-                onChunk(chunk.text ?? '');
-            }
-        } else if (provider === 'openai' || provider === 'deepseek' || provider === 'ali') {
-            const { endpoint, model } = getModelConfig(provider);
-            if (!endpoint || !model) {
-                throw new Error(`Configuration for provider ${provider} is missing. Please check your .env file.`);
-            }
-            
-            const transformedHistory = history.filter(h => h.parts && h.parts.length > 0).map(msg => ({
-              role: msg.role === 'model' ? 'assistant' : 'user',
-              content: msg.parts[0].text
-            }));
-
-            const body = {
-                model,
-                messages: [{ role: 'system', content: systemInstruction }, ...transformedHistory, { role: 'user', content: userPrompt }],
-                stream: true,
-                max_tokens: 4096
-            };
-
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKeys[provider]}` },
-                body: JSON.stringify(body)
-            });
-
-            if (!response.ok) {
-                 const errorText = await response.text();
-                 let errorMessage = errorText;
-                 if (response.status >= 500 && response.status < 600) {
-                     errorMessage = `代理服务器连接失败 (状态码: ${response.status})。这通常是由于网络问题、VPN配置错误或目标API服务暂时不可用导致的。请检查您的网络连接并重试。`;
-                 } else if (errorText) {
-                     try {
-                         const errorJson = JSON.parse(errorText);
-                         errorMessage = errorJson.error?.message || errorMessage;
-                     } catch (e) { /* Ignore if parsing fails */ }
-                 }
-                 throw new Error(`API 错误: ${response.status} ${response.statusText} - ${errorMessage}`);
-            }
-
-            if (!response.body) {
-                throw new Error("Response body is null");
-            }
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || ''; // Keep the last partial line in the buffer
-
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.substring(6);
-                        if (data === '[DONE]') {
-                            // Stream finished
-                        } else {
-                            try {
-                                const parsed = JSON.parse(data);
-                                const textChunk = parsed.choices?.[0]?.delta?.content || '';
-                                if (textChunk) {
-                                    onChunk(textChunk);
-                                }
-                            } catch (e) {
-                                console.error('Error parsing stream data:', e);
-                            }
-                        }
-                    }
-                }
-            }
+        
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            onChunk(decoder.decode(value, { stream: true }));
         }
         onComplete();
     } catch (error: any) {
         if (error instanceof TypeError && error.message.toLowerCase().includes('failed to fetch')) {
-            onError(new Error(`网络请求失败。这可能是由于 CORS 策略、网络连接中断或代理服务器配置错误。请检查浏览器开发者工具中的网络(Network)和控制台(Console)选项卡以获取详细信息。`));
+            onError(new Error(`网络请求失败。无法连接到后端服务(${API_BASE_URL})。请检查网络连接、VPN配置或确认后端服务正在运行。`));
         } else {
             onError(error);
         }
@@ -418,66 +209,6 @@ const ThoughtsInputModal = ({
   );
 };
 
-
-const ApiKeyModal = ({
-  isOpen,
-  onClose,
-  onSave,
-  apiKeys,
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  onSave: (keys: { [key in ModelProvider]?: string }) => void;
-  apiKeys: { [key in ModelProvider]?: string };
-}) => {
-  const [keys, setKeys] = useState(apiKeys);
-
-  useEffect(() => {
-    setKeys(apiKeys);
-  }, [apiKeys, isOpen]);
-
-  if (!isOpen) return null;
-
-  const handleSave = () => {
-    onSave(keys);
-  };
-  
-  const providers: {id: ModelProvider, name: string}[] = [
-      {id: 'openai', name: 'OpenAI'},
-      {id: 'deepseek', name: 'DeepSeek'},
-      {id: 'ali', name: 'Ali'}
-  ];
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <h2>设置 API Keys</h2>
-        <p>请输入您在各个平台申请的 API Key，以便使用对应的模型。输入的内容将仅保存在您的浏览器中。</p>
-        {providers.map(p => (
-           <div key={p.id}>
-              <h4 style={{marginBottom: '8px'}}>{p.name}</h4>
-              <input
-                type="password"
-                className="modal-textarea" // Re-using style
-                value={keys[p.id] || ''}
-                onChange={(e) => setKeys({ ...keys, [p.id]: e.target.value })}
-                placeholder={`请输入 ${p.name} API Key`}
-              />
-            </div>
-        ))}
-        <div className="modal-actions">
-          <button className="btn btn-secondary" onClick={onClose}>
-            取消
-          </button>
-          <button className="btn btn-primary" onClick={handleSave}>
-            保存
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 const HomeInputView = ({
   inputText,
   setInputText,
@@ -485,8 +216,6 @@ const HomeInputView = ({
   onAudit,
   selectedModel,
   setSelectedModel,
-  onOpenApiModal,
-  apiKeys,
   isProcessing,
   knowledgeBases,
   isKbLoading,
@@ -502,8 +231,6 @@ const HomeInputView = ({
   onAudit: () => void;
   selectedModel: ModelProvider;
   setSelectedModel: (model: ModelProvider) => void;
-  onOpenApiModal: () => void;
-  apiKeys: { [key in ModelProvider]?: string };
   isProcessing: boolean;
   knowledgeBases: { id: string; name: string }[];
   isKbLoading: boolean;
@@ -645,10 +372,9 @@ const HomeInputView = ({
                         {modelProviders.map(model => (
                             <button
                                 key={model}
-                                className={`model-btn ${selectedModel === model ? 'active' : ''} ${model !== 'gemini' && !apiKeys[model] ? 'disabled' : ''}`}
+                                className={`model-btn ${selectedModel === model ? 'active' : ''}`}
                                 onClick={() => setSelectedModel(model)}
-                                disabled={(model !== 'gemini' && !apiKeys[model]) || isProcessing}
-                                title={model !== 'gemini' && !apiKeys[model] ? `请先设置 ${model} API Key` : ''}
+                                disabled={isProcessing}
                             >
                                 {model}
                             </button>
@@ -680,9 +406,7 @@ const HomeInputView = ({
                 </div>
                 <div className="config-group">
                     <h4>API Keys</h4>
-                    <button className="btn btn-secondary" onClick={onOpenApiModal} style={{ width: '100%' }}>
-                        设置 API Keys
-                    </button>
+                    <p className="instruction-text">API Keys 现已在后端服务中统一管理，无需在前端配置。</p>
                 </div>
             </div>
         </div>
@@ -711,7 +435,6 @@ const NoteAnalysisView = ({
   error,
   provider,
   originalText,
-  apiKeys,
   selectedKnowledgeBaseId,
   knowledgeBases
 }: {
@@ -720,7 +443,6 @@ const NoteAnalysisView = ({
   error: string | null;
   provider: ModelProvider;
   originalText: string;
-  apiKeys: { [key in ModelProvider]?: string };
   selectedKnowledgeBaseId: string | null;
   knowledgeBases: { id: string; name: string }[];
 }) => {
@@ -810,7 +532,7 @@ const NoteAnalysisView = ({
 
     try {
         // Step 1: Call local backend to get relevant context
-        const backendResponse = await fetch('/api/find-related', {
+        const backendResponse = await fetch(`${API_BASE_URL}/find-related`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -861,7 +583,7 @@ const NoteAnalysisView = ({
         
         const roamingPromises = sources.map(async (source: Source) => {
             const userPrompt = `[Relevant Passage from Knowledge Base]:\n${source.content_chunk}\n\n[User's Original Note]:\n${analysisResult.organizedText}`;
-            const genAiResponseText = await callGenerativeAi(provider, systemInstruction, userPrompt, true, apiKeys, 'roaming');
+            const genAiResponseText = await callGenerativeAi(provider, systemInstruction, userPrompt, true, 'roaming');
             const result = JSON.parse(genAiResponseText.replace(/```json\n?|\n?```/g, ''));
 
             if (!result.conclusion) {
@@ -910,7 +632,6 @@ const NoteAnalysisView = ({
               provider,
               systemInstruction,
               chatInput,
-              apiKeys,
               chatHistoryForApi,
               (chunk) => {
                   setChatHistory(prev => {
@@ -1116,11 +837,9 @@ const parseAuditResponse = (responseText: string): { issues: AuditIssue[], error
 
 const AuditView = ({
     initialText,
-    apiKeys,
     selectedModel
 } : {
     initialText: string;
-    apiKeys: { [key in ModelProvider]?: string };
     selectedModel: ModelProvider;
 }) => {
     const [text] = useState(initialText);
@@ -1167,7 +886,7 @@ const AuditView = ({
         const userPrompt = `[Text to Audit]:\n\n${text}`;
         
         try {
-            const responseText = await callGenerativeAi(model, systemInstruction, userPrompt, true, apiKeys, 'audit');
+            const responseText = await callGenerativeAi(model, systemInstruction, userPrompt, true, 'audit');
             const { issues, error, rawResponse } = parseAuditResponse(responseText);
             setAuditResults({ [model]: { issues, error, rawResponse } });
             
@@ -1185,12 +904,6 @@ const AuditView = ({
         setSelectedIssueId(null);
 
         const allModels: ModelProvider[] = ['gemini', 'openai', 'deepseek', 'ali'];
-        const enabledModels = allModels.filter(m => m === 'gemini' || (apiKeys[m] && apiKeys[m]?.trim() !== ''));
-
-        if (enabledModels.length === 0) {
-            setIsLoading(false);
-            return;
-        }
 
         const systemInstruction = `You are a professional editor. Analyze the provided text based ONLY on the rules in the following checklist. For each issue you find, return a JSON object with "problematicText" (the exact, verbatim text segment from the original), "suggestion" (your proposed improvement), "checklistItem" (the specific rule from the checklist that was violated), and "explanation" (a brief explanation of why it's a problem). Your entire response MUST be a single JSON array of these objects, or an empty array [] if no issues are found.
 
@@ -1199,15 +912,15 @@ const AuditView = ({
 `;
         const userPrompt = `[Text to Audit]:\n\n${text}`;
 
-        const auditPromises = enabledModels.map(model => 
-            callGenerativeAi(model, systemInstruction, userPrompt, true, apiKeys, 'audit')
+        const auditPromises = allModels.map(model => 
+            callGenerativeAi(model, systemInstruction, userPrompt, true, 'audit')
         );
         
         const results = await Promise.allSettled(auditPromises);
         
         const newAuditResults: AuditResults = {};
         results.forEach((result, index) => {
-            const model = enabledModels[index];
+            const model = allModels[index];
             if (result.status === 'fulfilled') {
                 const { issues, error, rawResponse } = parseAuditResponse(result.value);
                 newAuditResults[model] = { issues, error, rawResponse };
@@ -1404,13 +1117,11 @@ const KnowledgeChatView = ({
   knowledgeBaseName,
   initialQuestion,
   provider,
-  apiKeys,
 }: {
   knowledgeBaseId: string;
   knowledgeBaseName: string;
   initialQuestion?: string;
   provider: ModelProvider;
-  apiKeys: { [key in ModelProvider]?: string };
 }) => {
   const [chatHistory, setChatHistory] = useState<NoteChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -1483,7 +1194,7 @@ const KnowledgeChatView = ({
 
     try {
       // Step 1: ALWAYS query the knowledge base
-      const backendResponse = await fetch('/api/find-related', {
+      const backendResponse = await fetch(`${API_BASE_URL}/find-related`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: messageToSend, collection_name: knowledgeBaseId, top_k: 5 })
@@ -1519,7 +1230,7 @@ const KnowledgeChatView = ({
       const chatHistoryForApi: ChatMessage[] = []; // No history is passed for KB-mode to force focus on provided context
 
       await callGenerativeAiStream(
-          provider, systemInstruction, userPrompt, apiKeys, chatHistoryForApi,
+          provider, systemInstruction, userPrompt, chatHistoryForApi,
           (chunk) => {
               setChatHistory(prev => {
                   const newHistory = [...prev];
@@ -1558,7 +1269,7 @@ const KnowledgeChatView = ({
         });
         setIsChatLoading(false);
     }
-  }, [chatInput, isChatLoading, knowledgeBaseId, provider, apiKeys]);
+  }, [chatInput, isChatLoading, knowledgeBaseId, provider]);
 
   useEffect(() => {
     if (initialQuestion && !isInitialQuestionSent.current) {
@@ -1705,14 +1416,12 @@ const DiffView = ({ originalText, revisedText }: { originalText: string; revised
 const WritingView = ({
   initialText,
   onTextChange,
-  apiKeys,
   selectedModel,
   selectedKnowledgeBase,
   knowledgeBases,
 }: {
   initialText: string;
   onTextChange: (newText: string) => void;
-  apiKeys: { [key in ModelProvider]?: string };
   selectedModel: ModelProvider;
   selectedKnowledgeBase: string | null;
   knowledgeBases: { id: string; name: string }[];
@@ -1765,7 +1474,7 @@ ${styleText.trim()}
     const userPrompt = `[Text for Analysis]:\n\n${currentText}`;
 
     try {
-      const responseText = await callGenerativeAi(selectedModel, systemInstruction, userPrompt, true, apiKeys, 'writing');
+      const responseText = await callGenerativeAi(selectedModel, systemInstruction, userPrompt, true, 'writing');
       
       // If another request has started, ignore the result of this one to prevent race conditions.
       if (fetchId !== fetchIdRef.current) return;
@@ -1790,7 +1499,7 @@ ${styleText.trim()}
           setIsLoading(false);
       }
     }
-  }, 1500), [selectedModel, apiKeys]);
+  }, 1500), [selectedModel]);
 
   useEffect(() => {
     onTextChange(text);
@@ -1854,7 +1563,7 @@ ${styleText.trim()}
     setKbResults(null);
 
     try {
-        const backendResponse = await fetch('/api/find-related', {
+        const backendResponse = await fetch(`${API_BASE_URL}/find-related`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2043,24 +1752,8 @@ const App = () => {
     const [noteAnalysisResult, setNoteAnalysisResult] = useState<NoteAnalysis | null>(null);
     const [noteAnalysisError, setNoteAnalysisError] = useState<string | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
-    const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
     const [isThoughtsModalOpen, setIsThoughtsModalOpen] = useState(false);
     
-    const [apiKeys, setApiKeys] = useState<{ [key in ModelProvider]?: string }>(() => {
-        try {
-            const savedKeys = localStorage.getItem('apiKeys');
-            const parsedKeys = savedKeys ? JSON.parse(savedKeys) : {};
-            // Set keys from environment variables if available
-            parsedKeys.openai = parsedKeys.openai || process.env.OPENAI_API_KEY;
-            parsedKeys.deepseek = parsedKeys.deepseek || process.env.DEEPSEEK_API_KEY;
-            parsedKeys.ali = parsedKeys.ali || process.env.ALI_API_KEY;
-            return parsedKeys;
-        } catch (e) {
-            console.error("Failed to parse API keys from localStorage", e);
-            return {};
-        }
-    });
-
     const [selectedModel, setSelectedModel] = useState<ModelProvider>('gemini');
 
     const [knowledgeBases, setKnowledgeBases] = useState<{ id: string; name: string }[]>([]);
@@ -2071,20 +1764,10 @@ const App = () => {
     
     useEffect(() => {
         const fetchKnowledgeBases = async () => {
-            // Check if running in production (e.g., on GitHub Pages)
-            // Vite sets `process.env.NODE_ENV` to 'production' for production builds.
-            if (process.env.NODE_ENV === 'production') {
-                setKbError("知识库功能在此在线演示版中不可用。此功能需要连接本地后端服务才能运行。");
-                setIsKbLoading(false);
-                setKnowledgeBases([]);
-                setSelectedKnowledgeBase(null);
-                return;
-            }
-
             setIsKbLoading(true);
             setKbError(null);
             try {
-                const response = await fetch('/api/list-collections');
+                const response = await fetch(`${API_BASE_URL}/list-collections`);
                 if (!response.ok) {
                     const errorText = await response.text().catch(() => response.statusText);
                     let errorJson;
@@ -2105,7 +1788,7 @@ const App = () => {
                 }
             } catch (error: any) {
                 console.error("Failed to fetch knowledge bases:", error);
-                const userFriendlyError = "无法连接到知识库服务。请确保本地后端服务正在运行，并刷新页面重试。";
+                const userFriendlyError = "无法连接到知识库服务。请检查后端服务是否正在运行，并刷新页面重试。";
                 setKbError(userFriendlyError);
                 setKnowledgeBases([]);
                 setSelectedKnowledgeBase(null);
@@ -2127,7 +1810,7 @@ const App = () => {
         const userPrompt = `Here are my notes:\n\n${inputText}\n\nHere are my thoughts on these notes:\n\n${userThoughts}`;
 
         try {
-            const responseText = await callGenerativeAi(selectedModel, systemInstruction, userPrompt, true, apiKeys, 'notes');
+            const responseText = await callGenerativeAi(selectedModel, systemInstruction, userPrompt, true, 'notes');
             let result;
             try {
                 result = JSON.parse(responseText);
@@ -2177,12 +1860,6 @@ const App = () => {
         setView('knowledge-chat');
     };
 
-    const handleSaveApiKeys = (keys: { [key in ModelProvider]?: string }) => {
-        setApiKeys(keys);
-        localStorage.setItem('apiKeys', JSON.stringify(keys));
-        setIsApiKeyModalOpen(false);
-    };
-
     const renderView = () => {
         switch (view) {
             case 'notes':
@@ -2192,12 +1869,11 @@ const App = () => {
                     analysisResult={noteAnalysisResult} 
                     provider={selectedModel}
                     originalText={inputText}
-                    apiKeys={apiKeys}
                     selectedKnowledgeBaseId={selectedKnowledgeBase}
                     knowledgeBases={knowledgeBases}
                 />;
             case 'audit':
-                 return <AuditView initialText={inputText} apiKeys={apiKeys} selectedModel={selectedModel} />;
+                 return <AuditView initialText={inputText} selectedModel={selectedModel} />;
             case 'knowledge-chat':
                 if (!selectedKnowledgeBase) {
                     return <div className="error-message">错误：知识库未选择。请返回首页选择一个知识库。</div>;
@@ -2207,13 +1883,11 @@ const App = () => {
                     knowledgeBaseName={knowledgeBases.find(kb => kb.id === selectedKnowledgeBase)?.name || selectedKnowledgeBase}
                     initialQuestion={initialKnowledgeChatQuestion}
                     provider={selectedModel}
-                    apiKeys={apiKeys}
                 />;
             case 'writing':
                 return <WritingView
                     initialText={inputText}
                     onTextChange={setInputText}
-                    apiKeys={apiKeys}
                     selectedModel={selectedModel}
                     selectedKnowledgeBase={selectedKnowledgeBase}
                     knowledgeBases={knowledgeBases}
@@ -2228,8 +1902,6 @@ const App = () => {
                         onAudit={handleTriggerAudit}
                         selectedModel={selectedModel}
                         setSelectedModel={setSelectedModel}
-                        onOpenApiModal={() => setIsApiKeyModalOpen(true)}
-                        apiKeys={apiKeys}
                         isProcessing={isProcessing}
                         knowledgeBases={knowledgeBases}
                         isKbLoading={isKbLoading}
@@ -2264,12 +1936,6 @@ const App = () => {
               {renderView()}
             </div>
             
-            <ApiKeyModal 
-                isOpen={isApiKeyModalOpen}
-                onClose={() => setIsApiKeyModalOpen(false)}
-                onSave={handleSaveApiKeys}
-                apiKeys={apiKeys}
-            />
             <ThoughtsInputModal
                 isOpen={isThoughtsModalOpen}
                 onClose={handleCloseThoughtsModal}

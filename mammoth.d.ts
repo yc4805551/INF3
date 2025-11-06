@@ -1,4 +1,5 @@
-// FIX: Removed the reference to "vite/client" to resolve a "Cannot find type definition file" error. The project does not use client-side Vite features like `import.meta.env`, so this reference is not needed.
+// FIX: Add Vite client types reference to provide type definitions for `import.meta.env` and resolve TypeScript errors.
+/// <reference types="vite/client" />
 
 declare namespace NodeJS {
   interface ProcessEnv {

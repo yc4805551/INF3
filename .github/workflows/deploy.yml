@@ -37,7 +37,7 @@ jobs:
           cache: 'npm'
           
       - name: Install dependencies
-        # 强制删除 package-lock.json 来修复 rollup 错误
+        # Using npm install after removing lock file as per user's reference file
         run: |
           rm -f package-lock.json
           npm install
@@ -45,9 +45,8 @@ jobs:
       - name: Build
         run: npm run build
         env: 
-          # --- 关键修改 ---
-          # 我们只注入你后端 API 的地址
-          # 所有的 AI API Keys 现在都安全地存在于你的 Render 后端
+          # Inject the production backend API URL from repository secrets.
+          # All AI API Keys should be securely stored as environment variables on your Render backend.
           VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
           
       - name: Setup Pages
@@ -55,7 +54,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # 上传 'dist' 文件夹
+          # Upload the 'dist' directory
           path: './dist'
       - name: Deploy to GitHub Pages
         id: deployment

@@ -21,7 +21,6 @@ from flask import Flask, request, jsonify, Response, stream_with_context # 新�
 from flask_cors import CORS
 from pymilvus import connections, utility, Collection, CollectionSchema, FieldSchema, DataType
 from dotenv import load_dotenv
-import pytesseract
 
 # --- 加载环境变量 ---
 load_dotenv()
@@ -813,16 +812,6 @@ if __name__ == '__main__':
     # 运行: flask run --port=5000
     # (或在生产环境中使用 gunicorn)
     app.run(debug=True, port=5000)
-    # region Tesseract OCR Configuration
-    try:
-        if TESSERACT_PATH and os.path.exists(TESSERACT_PATH):
-            pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
-            logging.info(f"Tesseract-OCR 路径已设置为: {TESSERACT_PATH}")
-        else:
-            logging.warning("TESSERACT_PATH 未在 .env 文件中设置或路径无效。OCR功能可能无法使用。")
-    except Exception as e:
-        logging.error(f"设置 Tesseract-OCR 路径时出错: {e}")
-    # endregion
     
     # region Environment Variables loading
     def list_collections():

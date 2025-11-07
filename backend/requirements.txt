@@ -1,7 +1,9 @@
-flask
+Flask
 flask_cors
 pymilvus
 python-dotenv
 requests
 watchdog
-gunicorn  # (这是 Render 运行 Flask 所必需的)
+gunicorn
+click
+# (以及您已有的其他任何库)

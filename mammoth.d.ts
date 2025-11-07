@@ -2,33 +2,37 @@
 // This allows `declare module 'mammoth'` to be a primary declaration, fixing the `export =` error,
 // and global interfaces are declared directly without `declare global`.
 
-// These interfaces will be merged into the global scope automatically by TypeScript,
-// augmenting Vite's built-in types without conflict.
-interface ImportMetaEnv {
-  readonly PROD: boolean;
-  readonly DEV: boolean;
-  readonly VITE_API_BASE_URL?: string;
-  readonly VITE_GEMINI_API_KEY?: string;
-  readonly VITE_OPENAI_API_KEY?: string;
-  readonly VITE_OPENAI_TARGET_URL?: string;
-  readonly VITE_OPENAI_MODEL?: string;
-  readonly VITE_DEEPSEEK_API_KEY?: string;
-  readonly VITE_DEEPSEEK_ENDPOINT?: string;
-  readonly VITE_DEEPSEEK_MODEL?: string;
-  readonly VITE_ALI_API_KEY?: string;
-  readonly VITE_ALI_TARGET_URL?: string;
-  readonly VITE_ALI_ENDPOINT?: string;
-  readonly VITE_ALI_MODEL?: string;
-}
+// FIX: Wrapped global augmentations in `declare global` to correctly modify the global scope
+// when the file is treated as a module, resolving TypeScript errors.
+declare global {
+  // These interfaces will be merged into the global scope automatically by TypeScript,
+  // augmenting Vite's built-in types without conflict.
+  interface ImportMetaEnv {
+    // FIX: Removed PROD and DEV as they are already defined by Vite's client types,
+    // resolving the "All declarations of '...' must have identical modifiers" error.
+    readonly VITE_API_BASE_URL?: string;
+    readonly VITE_GEMINI_API_KEY?: string;
+    readonly VITE_OPENAI_API_KEY?: string;
+    readonly VITE_OPENAI_TARGET_URL?: string;
+    readonly VITE_OPENAI_MODEL?: string;
+    readonly VITE_DEEPSEEK_API_KEY?: string;
+    readonly VITE_DEEPSEEK_ENDPOINT?: string;
+    readonly VITE_DEEPSEEK_MODEL?: string;
+    readonly VITE_ALI_API_KEY?: string;
+    readonly VITE_ALI_TARGET_URL?: string;
+    readonly VITE_ALI_ENDPOINT?: string;
+    readonly VITE_ALI_MODEL?: string;
+  }
 
-interface ImportMeta {
-  readonly env: ImportMetaEnv;
-}
+  interface ImportMeta {
+    readonly env: ImportMetaEnv;
+  }
 
-// Augment the existing NodeJS.ProcessEnv interface for environment variables.
-namespace NodeJS {
-  interface ProcessEnv {
-    readonly API_KEY?: string;
+  // Augment the existing NodeJS.ProcessEnv interface for environment variables.
+  namespace NodeJS {
+    interface ProcessEnv {
+      readonly API_KEY?: string;
+    }
   }
 }
 

@@ -378,44 +378,99 @@ def _format_history(history):
 # region AI Generation
 @app.route('/api/generate', methods=['POST']) 
 def handle_generate(): 
-    """处理非流式 AI 生成请求""" 
+    """处理非流式 AI 生成请求 (v2 - 增加 Gemini JSON 清理)""" 
     try: 
         data = request.get_json() 
         provider = data.get('provider') 
         
         logging.info(f"收到非流式生成请求，Provider: {provider}") 
         
-        # 统一调用流式函数，并收集响应 
         full_response = "" 
         
         if provider == 'gemini': 
             if not GEMINI_API_KEY: 
                 return jsonify({"error": "GEMINI_API_KEY 未设置"}), 500 
             
-            # Gemini 仍然使用官方API 
-            # 我们调用那个“已修复”的 _stream_gemini 函数 
             for chunk in _stream_gemini(data.get('userPrompt'), data.get('systemInstruction'), data.get('history', [])): 
-                if "[后端" in chunk: # 检查流中是否有错误 
+                if "[后端" in chunk: 
                     raise Exception(chunk) 
                 full_response += chunk 
-            return jsonify({"text": full_response}) 
+            
+            # --- ⬇️ 这是您缺失的关键清理步骤 ⬇️ --- 
+            logging.info(f"Gemini 原始响应: {full_response}") 
+            
+            import re 
+            json_string = full_response 
+            
+            # 1. 从Markdown中提取 
+            json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', full_response, re.IGNORECASE) 
+            if json_match: 
+                json_string = json_match.group(1) 
+
+            # 2. 修复 Gemini 生成的无效JSON键 (例如 \"key\":) 
+            # 这会将 \"problematicText\": 替换为 "problematicText": 
+            cleaned_string = re.sub(r'\\"(\w+)\\"(\s*):', r'"\1"\2:', json_string) 
+            
+            # 3. 修复 Gemini 生成的无效JSON字符串 (例如 \"value\") 
+            # 这会将 \"测1试\\n\" 替换为 "测1试\\n" 
+            cleaned_string = re.sub(r':\s*\\"(.*?)\\"', r': "\1"', cleaned_string) 
+            
+            logging.info(f"清理后的 JSON: {cleaned_string}") 
+            return Response(cleaned_string, content_type='application/json') 
+            # --- ⬆️ 清理结束 ⬆️ --- 
             
         elif provider == 'openai': 
-            # 使用代理的OpenAI 
             return _call_openai_proxy(data) 
         elif provider == 'deepseek': 
-            # 使用代理的Deepseek 
             return _call_deepseek_proxy(data) 
         elif provider == 'ali': 
-            # 使用代理的Ali 
             return _call_ali_proxy(data) 
         else: 
             return jsonify({"error": f"不支持的 provider: {provider}"}), 400 
 
     except Exception as e: 
         logging.error(f"API /api/generate 错误: {e}") 
-        # 将异常信息作为JSON错误返回 
-        return jsonify({"error": "服务器内部错误", "details": str(e)}), 500
+        return jsonify({"error": "服务器内部错误", "details": str(e)}), 500 
+
+@app.route('/api/generate-stream', methods=['POST']) 
+def handle_generate_stream(): 
+    """处理流式 AI 生成请求""" 
+    try: 
+        data = request.get_json() 
+        provider = data.get('provider') 
+        system_instruction = data.get('systemInstruction') 
+        user_prompt = data.get('userPrompt') 
+        history = data.get('history', []) 
+        
+        logging.info(f"收到 /api/generate-stream 请求，Provider: {provider}") 
+
+        if provider == 'gemini': 
+            if not GEMINI_API_KEY: 
+                # 这个错误应该在流中返回，而不是作为JSON 
+                return Response(stream_with_context(["[后端代理错误: GEMINI_API_KEY 未设置]"]), content_type='text/plain') 
+            return Response(stream_with_context(_stream_gemini(user_prompt, system_instruction, history)), content_type='text/plain') 
+        
+        elif provider == 'openai': 
+            if not OPENAI_API_KEY: 
+                return Response(stream_with_context(["[后端代理错误: OPENAI_API_KEY 未设置]"]), content_type='text/plain') 
+            return Response(stream_with_context(_stream_openai_proxy(user_prompt, system_instruction, history)), content_type='text/plain') 
+            
+        elif provider == 'deepseek': 
+            if not DEEPSEEK_API_KEY: 
+                return Response(stream_with_context(["[后端代理错误: DEEPSEEK_API_KEY 未设置]"]), content_type='text/plain') 
+            return Response(stream_with_context(_stream_deepseek_proxy(user_prompt, system_instruction, history)), content_type='text/plain') 
+            
+        elif provider == 'ali': 
+            if not ALI_API_KEY: 
+                return Response(stream_with_context(["[后端代理错误: ALI_API_KEY 未设置]"]), content_type='text/plain') 
+            return Response(stream_with_context(_stream_ali_proxy(user_prompt, system_instruction, history)), content_type='text/plain') 
+
+        else: 
+            return Response(stream_with_context([f"[后端代理错误: 不支持的 provider: {provider}]"]), content_type='text/plain') 
+
+    except Exception as e: 
+        logging.error(f"API /api/generate-stream 错误: {e}") 
+        return Response(stream_with_context([f"[后端内部错误: {str(e)}]"]), content_type='text/plain')
 
 def _stream_gemini(user_prompt, system_instruction, history): 
     """处理Gemini模型的流式响应 (v3 - 修复 try/except 逻辑)""" 
@@ -465,7 +520,7 @@ def _stream_gemini(user_prompt, system_instruction, history):
         contents.append({"role": "user", "parts": [{"text": user_prompt}]}) 
         
         # 4. 构建API请求 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key={GEMINI_API_KEY}" 
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:streamGenerateContent?key={GEMINI_API_KEY}" 
         headers = {'Content-Type': 'application/json'} 
         payload = { 
             "contents": contents, 
@@ -542,7 +597,7 @@ def _call_openai_proxy(data):
         response_data = response.json()
         
         if 'choices' in response_data and len(response_data['choices']) > 0:
-            return jsonify({"text": response_data['choices'][0]['message']['content']})
+            return Response(response_data['choices'][0]['message']['content'], content_type='application/json')
         else:
             raise ValueError("Invalid response format from OpenAI proxy")
     
@@ -645,7 +700,7 @@ def _call_deepseek_proxy(data):
         response_data = response.json()
         
         if 'choices' in response_data and len(response_data['choices']) > 0:
-            return jsonify({"text": response_data['choices'][0]['message']['content']})
+            return Response(response_data['choices'][0]['message']['content'], content_type='application/json')
         else:
             raise ValueError("Invalid response format from DeepSeek proxy")
     
@@ -749,7 +804,7 @@ def _call_ali_proxy(data):
         response_data = response.json()
         
         if 'choices' in response_data and len(response_data['choices']) > 0:
-            return jsonify({"text": response_data['choices'][0]['message']['content']})
+            return Response(response_data['choices'][0]['message']['content'], content_type='application/json')
         else:
             raise ValueError("Invalid response format from Ali proxy")
     

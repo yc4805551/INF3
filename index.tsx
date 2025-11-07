@@ -1776,15 +1776,34 @@ ${styleText.trim()}
       // If another request has started, ignore the result of this one to prevent race conditions.
       if (fetchId !== fetchIdRef.current) return;
 
-      const { data, error: parseError, rawResponse } = parseJsonResponse<WritingSuggestion[]>(responseText);
+      // --- ⬇️ 关键修改在这里 ---
+      // 1. 使用 <unknown> 来解析，这样我们可以先检查它的结构
+      const { data, error: parseError, rawResponse } = parseJsonResponse<unknown>(responseText);
 
       if (parseError || !data) {
         console.error("Raw response on parse error:", rawResponse);
         throw new Error(parseError || "Received invalid data from model.");
       }
       
-      const validSuggestions = data.filter(s => s.originalText && s.revisedText && s.explanation);
+      let suggestionsArray: WritingSuggestion[] = [];
+
+      // 2. 检查 data 是否是一个数组
+      if (Array.isArray(data)) {
+        suggestionsArray = data as WritingSuggestion[];
+      }
+      // 3. 检查 data 是否是一个包含 'suggestions' 键的对象
+      else if (typeof data === 'object' && data !== null && 'suggestions' in data && Array.isArray((data as { suggestions: any }).suggestions)) {
+        suggestionsArray = (data as { suggestions: WritingSuggestion[] }).suggestions;
+      }
+      // 4. 如果两种都不是，说明格式错误
+      else {
+        throw new Error("Model returned an unexpected JSON format (not an array, or an object with 'suggestions').");
+      }
+
+      // 5. 在“清洗”过的数组上安全地调用 .filter
+      const validSuggestions = suggestionsArray.filter(s => s.originalText && s.revisedText && s.explanation);
       setSuggestions(validSuggestions);
+      // --- ⬆️ 修改结束 ---
 
     } catch (err: any) {
       if (fetchId === fetchIdRef.current) {

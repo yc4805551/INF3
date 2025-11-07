@@ -24,7 +24,7 @@ streamlit run sminfy.py
 
 C:\Users\GLY-PC\Documents\CODE\project\INFV3\backend>flask watch
 
-s
+
 cd C:\Users\GLY-PC\Documents\CODE\project\INFV3\backend
 
 flask watch

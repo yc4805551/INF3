@@ -21,6 +21,7 @@ from flask import Flask, request, jsonify, Response, stream_with_context # 新�
 from flask_cors import CORS
 from pymilvus import connections, utility, Collection, CollectionSchema, FieldSchema, DataType
 from dotenv import load_dotenv
+import pytesseract
 
 # --- 加载环境变量 ---
 load_dotenv()
@@ -77,14 +78,22 @@ logging.basicConfig(level=logging.INFO,
 app = Flask(__name__)
 CORS(app)
 
-try:
-    logging.info(f"正在连接到 Milvus (Host: {MILVUS_HOST}, Port: {MILVUS_PORT})...")
-    connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
-    logging.info("成功连接到 Milvus。")
-except Exception as e:
-    logging.error(f"连接 Milvus 失败: {e}")
+MILVUS_PORT = os.getenv("MILVUS_PORT")
 
-# --- 辅助函数 (知识库部分) ---
+# endregion
+
+# region Milvus (Vector DB) Connection
+try: 
+    logging.info(f"正在连接到 Milvus (Host: {MILVUS_HOST}, Port: {MILVUS_PORT})...") 
+    connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT) 
+    logging.info("成功连接到 Milvus。") 
+except Exception as e: 
+    logging.error(f"连接 Milvus 失败: {e}") 
+    logging.warning("服务器将继续运行，但知识库功能不可用。") 
+
+# endregion
+
+# region Database and ORM setup
 def get_model_for_collection(collection_name: str) -> str:
     for key, model_name in MODEL_MAPPING.items():
         if key in collection_name:
@@ -357,177 +366,138 @@ def _format_history(history):
     # (这里您可以根据不同模型的需要调整格式)
     return history
 
-@app.route('/api/generate', methods=['POST'])
-def handle_generate():
-    # 简化了响应收集方式，直接使用字符串拼接
-    full_response = ""
-    
-    if provider == 'gemini':
-        # 优化了错误检测逻辑
-        for chunk in _stream_gemini(...):
-            if "[后端" in chunk:  # 检查流中是否有错误
-                raise Exception(chunk)
-            full_response += chunk
-    try:
-        data = request.get_json()
-        provider = data.get('provider')
+# region AI Generation
+@app.route('/api/generate', methods=['POST']) 
+def handle_generate(): 
+    """处理非流式 AI 生成请求""" 
+    try: 
+        data = request.get_json() 
+        provider = data.get('provider') 
         
-        logging.info(f"收到非流式生成请求，Provider: {provider}")
+        logging.info(f"收到非流式生成请求，Provider: {provider}") 
         
-        # 统一调用流式函数，并收集响应
-        full_response = ""
+        # 统一调用流式函数，并收集响应 
+        full_response = "" 
         
-        if provider == 'gemini':
-            if not GEMINI_API_KEY:
-                return jsonify({"error": "GEMINI_API_KEY 未设置"}), 500
-            # Gemini 仍然使用官方API
-            for chunk in _stream_gemini(data.get('userPrompt'), data.get('systemInstruction'), data.get('history', [])):
-                if "[后端" in chunk: # 检查流中是否有错误
-                    raise Exception(chunk)
-                full_response += chunk
-            return jsonify({"text": full_response})
+        if provider == 'gemini': 
+            if not GEMINI_API_KEY: 
+                return jsonify({"error": "GEMINI_API_KEY 未设置"}), 500 
             
-        elif provider == 'openai':
-            # 使用代理的OpenAI
-            return _call_openai_proxy(data)
-        elif provider == 'deepseek':
-            # 使用代理的Deepseek
-            return _call_deepseek_proxy(data)
-        elif provider == 'ali':
-            # 使用代理的Ali
-            return _call_ali_proxy(data)
-        else:
-            return jsonify({"error": f"不支持的 provider: {provider}"}), 400
+            # Gemini 仍然使用官方API 
+            # 我们调用那个“已修复”的 _stream_gemini 函数 
+            for chunk in _stream_gemini(data.get('userPrompt'), data.get('systemInstruction'), data.get('history', [])): 
+                if "[后端" in chunk: # 检查流中是否有错误 
+                    raise Exception(chunk) 
+                full_response += chunk 
+            return jsonify({"text": full_response}) 
+            
+        elif provider == 'openai': 
+            # 使用代理的OpenAI 
+            return _call_openai_proxy(data) 
+        elif provider == 'deepseek': 
+            # 使用代理的Deepseek 
+            return _call_deepseek_proxy(data) 
+        elif provider == 'ali': 
+            # 使用代理的Ali 
+            return _call_ali_proxy(data) 
+        else: 
+            return jsonify({"error": f"不支持的 provider: {provider}"}), 400 
 
-    except Exception as e:
-        logging.error(f"API /api/generate 错误: {e}")
-        # 将异常信息作为JSON错误返回
+    except Exception as e: 
+        logging.error(f"API /api/generate 错误: {e}") 
+        # 将异常信息作为JSON错误返回 
         return jsonify({"error": "服务器内部错误", "details": str(e)}), 500
 
+def _stream_gemini(user_prompt, system_instruction, history): 
+    """处理Gemini模型的流式响应 (v3 - 修复 try/except 逻辑)""" 
+    try: 
+        # 初始化变量 
+        contents = [] 
+        last_role = None # 初始 last_role 必须是 None 
 
-@app.route('/api/generate-stream', methods=['POST'])
-def handle_generate_stream():
-    """处理流式 AI 生成请求"""
-    try:
-        data = request.get_json()
-        provider = data.get('provider')
-        system_instruction = data.get('systemInstruction')
-        user_prompt = data.get('userPrompt')
-        history = _format_history(data.get('history', []))
+        # 1. 处理 System Instruction (如果存在) 
+        if system_instruction: 
+            contents.append({"role": "user", "parts": [{"text": system_instruction}]}) 
+            contents.append({"role": "model", "parts": [{"text": "好的，我将遵循这个指示。"}]}) 
+            last_role = "model" 
         
-        logging.info(f"收到 /api/generate-stream 请求，Provider: {provider}")
-
-        if provider == 'gemini':
-            if not GEMINI_API_KEY:
-                return jsonify({"error": "GEMINI_API_KEY 未设置"}), 500
-            return Response(stream_with_context(_stream_gemini(user_prompt, system_instruction, history)), content_type='text/plain')
-        
-        elif provider == 'openai':
-            # 使用代理的OpenAI流式调用
-            return Response(stream_with_context(_stream_openai_proxy(user_prompt, system_instruction, history)), content_type='text/plain')
+        # 2. 处理历史消息 
+        for item in history: 
+            current_role = item.get('role') 
+            if not current_role: 
+                logging.warning(f"跳过缺少角色的历史记录: {item}") 
+                continue 
             
-        elif provider == 'deepseek':
-            # 使用代理的Deepseek流式调用
-            return Response(stream_with_context(_stream_deepseek_proxy(user_prompt, system_instruction, history)), content_type='text/plain')
+            # 验证parts格式 
+            parts = item.get('parts') 
+            if not parts or not isinstance(parts, list) or len(parts) == 0 or not parts[0].get('text'): 
+                logging.warning(f"跳过格式无效的历史记录: {item}") 
+                continue 
             
-        elif provider == 'ali':
-            # 使用代理的Ali流式调用
-            return Response(stream_with_context(_stream_ali_proxy(user_prompt, system_instruction, history)), content_type='text/plain')
-
-        else:
-            return jsonify({"error": f"不支持的 provider: {provider}"}), 400
-
-    except Exception as e:
-        logging.error(f"API /api/generate-stream 错误: {e}")
-        return jsonify({"error": "服务器内部错误", "details": str(e)}), 500
-
-def _stream_gemini(user_prompt, system_instruction, history):
-    """处理Gemini模型的流式响应"""
-    try:
-        # 初始化变量
-        contents = []
-        last_role = "model" if system_instruction else None
-        
-        # 处理历史消息
-        for item in history:
-            current_role = item.get('role')
-            if not current_role:
-                logging.warning(f"跳过缺少角色的历史记录: {item}")
-                continue
-            
-            # 验证parts格式
-            parts = item.get('parts')
-            if not parts or not isinstance(parts, list) or len(parts) == 0 or not parts[0].get('text'):
-                logging.warning(f"跳过格式无效的历史记录: {item}")
-                continue
-            
-            # 确保第一个消息必须是user
-            if not contents and current_role == 'model':
-                logging.warning("跳过历史记录中开头的 'model' 消息。")
-                continue
+            # 核心修复：如果 'contents' 为空，第一个角色必须是 'user' 
+            if not contents and current_role == 'model': 
+                logging.warning("跳过历史记录中开头的 'model' 消息。") 
+                continue 
                 
-            # 避免重复角色
-            if current_role == last_role:
-                logging.warning(f"跳过重复的角色: {current_role}")
-                continue
+            # 核心修复：如果当前角色与上一个角色相同，跳过此条 
+            if current_role == last_role: 
+                logging.warning(f"跳过重复的角色: {current_role}") 
+                continue 
             
-            # 添加有效的历史消息
-            contents.append(item)
-            last_role = current_role
+            # 添加有效的历史消息 
+            contents.append(item) 
+            last_role = current_role 
         
-        # 修复用户消息前必须是模型回复的问题
-        if last_role == 'user':
-            # 如果历史的最后一条是'user'，添加一个假的'model'回复
-            contents.append({"role": "model", "parts": [{"text": "..."}]})
+        # 3. 添加当前用户的消息 
+        if last_role == 'user': 
+            # 如果历史的最后一条是'user'，添加一个假的'model'回复 
+            contents.append({"role": "model", "parts": [{"text": "..."}]}) 
         
-        # 添加当前用户的消息
-        contents.append({"role": "user", "parts": [{"text": user_prompt}]})
+        contents.append({"role": "user", "parts": [{"text": user_prompt}]}) 
         
-        # 构建API请求
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key={GEMINI_API_KEY}"
-        headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 2048
-            },
-            "stream": True
-        }
+        # 4. 构建API请求 
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key={GEMINI_API_KEY}" 
+        headers = {'Content-Type': 'application/json'} 
+        payload = { 
+            "contents": contents, 
+            "generationConfig": { 
+                "temperature": 0.7, 
+                "maxOutputTokens": 2048 
+            } 
+            # "stream": True # 1.5-flash 的 streamGenerateContent 不需要这个 
+        } 
         
-        # 如果有系统指令，添加到payload
-        if system_instruction:
-            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        # 如果有系统指令，添加到payload (1.5-flash 使用 systemInstruction) 
+        if system_instruction: 
+            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]} 
         
-        # 发送API请求
-        r = requests.post(url, headers=headers, json=payload, stream=True)
-        
-        # 检查请求是否成功
-        if not r.ok:
-            error_details = r.text
-            logging.error(f"Gemini API 请求失败 (状态码: {r.status_code}): {error_details}")
-            yield f"[后端代理错误: Gemini API 返回 {r.status_code}. 详情: {error_details}]"
-            return
+        # 5. 发送API请求 
+        logging.info(f"发送到 Gemini 的 Payload (精简版): {len(contents)} 条消息。") 
+        with requests.post(url, headers=headers, json=payload, stream=True, timeout=180) as r: 
+            
+            if not r.ok: 
+                error_details = r.text 
+                logging.error(f"Gemini API 请求失败 (状态码: {r.status_code}): {error_details}") 
+                yield f"[后端代理错误: Gemini API 返回 {r.status_code}. 详情: {error_details}]" 
+                return 
 
-        # 处理流式响应
-        for line in r.iter_lines():
-            if line:
-                line_str = line.decode('utf-8').strip()
-                if line_str.startswith('"text":'):
-                    text_chunk = line_str.replace('"text": "', '').replace('"', '').replace(',', '').strip()
-                    yield text_chunk
-    
-        logging.error(f"调用 Gemini API 失败: {e}")
-        yield f"[后端代理错误: {str(e)}]"
-    except Exception as e:
-        logging.error(f"处理 Gemini 流时出错: {e}")
-        yield f"[后端内部错误: {str(e)}]"
+            # 6. 处理流式响应 
+            for line in r.iter_lines(): 
+                if line: 
+                    line_str = line.decode('utf-8').strip() 
+                    if line_str.startswith('"text":'): 
+                        text_chunk = line_str.replace('"text": "', '').replace('"', '').replace(',', '').strip() 
+                        yield text_chunk 
 
-
-# --- 代理 API 调用函数 ---
+    except requests.exceptions.RequestException as e: # 捕获网络请求错误 
+        logging.error(f"调用 Gemini API 失败: {e}") 
+        yield f"[后端代理错误: {str(e)}]" 
+    except Exception as e: # 捕获所有其他错误 
+        logging.error(f"处理 Gemini 流时出错: {e}") 
+        yield f"[后端内部错误: {str(e)}]" 
 
 def _call_openai_proxy(data):
-    """调用代理的 OpenAI API"""
+    """通过代理调用OpenAI兼容的API（非流式）"""
     try:
         url = f"{OPENAI_TARGET_URL}/v1/chat/completions"
         headers = {
@@ -843,3 +813,431 @@ if __name__ == '__main__':
     # 运行: flask run --port=5000
     # (或在生产环境中使用 gunicorn)
     app.run(debug=True, port=5000)
+    # region Tesseract OCR Configuration
+    try:
+        if TESSERACT_PATH and os.path.exists(TESSERACT_PATH):
+            pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+            logging.info(f"Tesseract-OCR 路径已设置为: {TESSERACT_PATH}")
+        else:
+            logging.warning("TESSERACT_PATH 未在 .env 文件中设置或路径无效。OCR功能可能无法使用。")
+    except Exception as e:
+        logging.error(f"设置 Tesseract-OCR 路径时出错: {e}")
+    # endregion
+    
+    # region Environment Variables loading
+    def list_collections():
+        try:
+            collections = utility.list_collections()
+            return jsonify({"collections": collections})
+        except Exception as e:
+            logging.error(f"API /list-collections 失败: {e}")
+            return jsonify({"error": "无法获取 Milvus 集合列表", "details": str(e)}), 500
+    
+    @app.route('/api/find-related', methods=['POST'])
+    def find_related():
+        try:
+            data = request.get_json()
+            query_text = data.get('text')
+            collection_name = data.get('collection_name')
+            top_k = data.get('top_k', 10)
+            if not query_text or not collection_name:
+                return jsonify({"error": "请求中缺少 'text' 或 'collection_name'"}), 400
+            if not utility.has_collection(collection_name):
+                return jsonify({"error": f"知识库 (集合) '{collection_name}' 不存在。"}), 404
+            model_to_use = get_model_for_collection(collection_name)
+            query_embedding = get_ollama_embedding(query_text, model_to_use)
+            collection = Collection(collection_name)
+            collection.load()
+            schema_fields = {field.name: field for field in collection.schema.fields}
+            output_fields = ["text", "source_file", "chunk_index", "full_path"]
+            search_params = {"metric_type": "COSINE", "params": {"nprobe": 10}}
+            results = collection.search(data=[query_embedding], anns_field="embedding", param=search_params, limit=top_k, output_fields=output_fields)
+            response_data = []
+            for hit in results[0]:
+                entity = hit.entity
+                response_data.append({
+                    "source_file": entity.get("source_file", "Unknown Source"),
+                    "content_chunk": entity.get("text", ""),
+                    "score": hit.distance,
+                })
+            collection.release()
+            return jsonify({"related_documents": response_data})
+        except (RuntimeError, ValueError) as e:
+            return jsonify({"error": str(e)}), 503
+        except Exception as e:
+            logging.error(f"API /find-related 发生内部错误: {e}", exc_info=True)
+            return jsonify({"error": "服务器内部错误", "details": str(e)}), 500
+    
+    @app.route('/api/', methods=['GET'])
+    def index():
+        return "知识库后端 + AI 代理服务器正在运行 (v13 + 代理)。"
+    
+    
+    # --- [新增] AI 代理端点 ---
+    
+    def _format_history(history):
+        """辅助函数：格式化历史记录"""
+        # (这里您可以根据不同模型的需要调整格式)
+        return history
+    
+    # region AI Generation
+    @app.route('/api/generate', methods=['POST']) 
+    def handle_generate(): 
+        """处理非流式 AI 生成请求""" 
+        try: 
+            data = request.get_json() 
+            provider = data.get('provider') 
+            
+            logging.info(f"收到非流式生成请求，Provider: {provider}") 
+            
+            # 统一调用流式函数，并收集响应 
+            full_response = "" 
+            
+            if provider == 'gemini': 
+                if not GEMINI_API_KEY: 
+                    return jsonify({"error": "GEMINI_API_KEY 未设置"}), 500 
+                
+                # Gemini 仍然使用官方API 
+                # 我们调用那个“已修复”的 _stream_gemini 函数 
+                for chunk in _stream_gemini(data.get('userPrompt'), data.get('systemInstruction'), data.get('history', [])): 
+                    if "[后端" in chunk: # 检查流中是否有错误 
+                        raise Exception(chunk) 
+                    full_response += chunk 
+                return jsonify({"text": full_response}) 
+                
+            elif provider == 'openai': 
+                # 使用代理的OpenAI 
+                return _call_openai_proxy(data) 
+            elif provider == 'deepseek': 
+                # 使用代理的Deepseek 
+                return _call_deepseek_proxy(data) 
+            elif provider == 'ali': 
+                # 使用代理的Ali 
+                return _call_ali_proxy(data) 
+            else: 
+                return jsonify({"error": f"不支持的 provider: {provider}"}), 400 
+    
+        except Exception as e: 
+            logging.error(f"API /api/generate 错误: {e}") 
+            # 将异常信息作为JSON错误返回 
+            return jsonify({"error": "服务器内部错误", "details": str(e)}), 500
+    
+ 
+    
+    def _call_openai_proxy(data):
+        """通过代理调用OpenAI兼容的API（非流式）"""
+        try:
+            url = f"{OPENAI_TARGET_URL}/v1/chat/completions"
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {OPENAI_API_KEY}'
+            }
+            
+            # 构建请求体
+            messages = []
+            if data.get('systemInstruction'):
+                messages.append({"role": "system", "content": data.get('systemInstruction')})
+            
+            # 添加历史消息
+            for item in data.get('history', []):
+                if item.get('role') and item.get('parts') and len(item.get('parts')) > 0:
+                    messages.append({
+                        "role": item.get('role'),
+                        "content": item.get('parts')[0].get('text')
+                    })
+            
+            # 添加用户消息
+            messages.append({"role": "user", "content": data.get('userPrompt')})
+            
+            payload = {
+                "model": OPENAI_MODEL,
+                "messages": messages,
+                "temperature": 0.7
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=180)
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if 'choices' in response_data and len(response_data['choices']) > 0:
+                return jsonify({"text": response_data['choices'][0]['message']['content']})
+            else:
+                raise ValueError("Invalid response format from OpenAI proxy")
+        
+        except Exception as e:
+            logging.error(f"调用 OpenAI 代理失败: {e}")
+            raise
+    
+    def _stream_openai_proxy(user_prompt, system_instruction, history):
+        """流式调用代理的 OpenAI API"""
+        try:
+            url = f"{OPENAI_TARGET_URL}/v1/chat/completions"
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {OPENAI_API_KEY}'
+            }
+            
+            # 构建请求体
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            
+            # 添加历史消息
+            for item in history:
+                if item.get('role') and item.get('parts') and len(item.get('parts')) > 0:
+                    messages.append({
+                        "role": item.get('role'),
+                        "content": item.get('parts')[0].get('text')
+                    })
+            
+            # 添加用户消息
+            messages.append({"role": "user", "content": user_prompt})
+            
+            payload = {
+                "model": OPENAI_MODEL,
+                "messages": messages,
+                "temperature": 0.7,
+                "stream": True
+            }
+            
+            with requests.post(url, headers=headers, json=payload, stream=True, timeout=180) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if line:
+                        line_str = line.decode('utf-8').strip()
+                        if line_str.startswith('data: '):
+                            line_str = line_str[6:]
+                            if line_str == '[DONE]':
+                                break
+                            try:
+                                chunk_data = json.loads(line_str)
+                                if ('choices' in chunk_data and 
+                                    len(chunk_data['choices']) > 0 and
+                                    chunk_data['choices'][0].get('delta') and
+                                    'content' in chunk_data['choices'][0]['delta']):
+                                    content = chunk_data['choices'][0]['delta']['content']
+                                    yield content
+                            except json.JSONDecodeError:
+                                logging.warning(f"无法解析 OpenAI 流式响应: {line_str}")
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"调用 OpenAI 代理失败: {e}")
+            yield f"[后端代理错误: {str(e)}]"
+        except Exception as e:
+            logging.error(f"处理 OpenAI 流时出错: {e}")
+            yield f"[后端内部错误: {str(e)}]"
+    
+    def _call_deepseek_proxy(data):
+        """调用代理的 DeepSeek API"""
+        try:
+            url = DEEPSEEK_ENDPOINT
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {DEEPSEEK_API_KEY}'
+            }
+            
+            # 构建请求体
+            messages = []
+            if data.get('systemInstruction'):
+                messages.append({"role": "system", "content": data.get('systemInstruction')})
+            
+            # 添加历史消息
+            for item in data.get('history', []):
+                if item.get('role') and item.get('parts') and len(item.get('parts')) > 0:
+                    messages.append({
+                        "role": item.get('role'),
+                        "content": item.get('parts')[0].get('text')
+                    })
+            
+            # 添加用户消息
+            messages.append({"role": "user", "content": data.get('userPrompt')})
+            
+            payload = {
+                "model": DEEPSEEK_MODEL,
+                "messages": messages,
+                "temperature": 0.7
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=180)
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if 'choices' in response_data and len(response_data['choices']) > 0:
+                return jsonify({"text": response_data['choices'][0]['message']['content']})
+            else:
+                raise ValueError("Invalid response format from DeepSeek proxy")
+
+        except Exception as e:
+            logging.error(f"调用 DeepSeek 代理失败: {e}")
+            raise
+    
+    def _stream_deepseek_proxy(user_prompt, system_instruction, history):
+        """流式调用代理的 DeepSeek API"""
+        try:
+            url = DEEPSEEK_ENDPOINT
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {DEEPSEEK_API_KEY}'
+            }
+            
+            # 构建请求体
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            
+            # 添加历史消息
+            for item in history:
+                if item.get('role') and item.get('parts') and len(item.get('parts')) > 0:
+                    messages.append({
+                        "role": item.get('role'),
+                        "content": item.get('parts')[0].get('text')
+                    })
+            
+            # 添加用户消息
+            messages.append({"role": "user", "content": user_prompt})
+            
+            payload = {
+                "model": DEEPSEEK_MODEL,
+                "messages": messages,
+                "temperature": 0.7,
+                "stream": True
+            }
+            
+            with requests.post(url, headers=headers, json=payload, stream=True, timeout=180) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if line:
+                        line_str = line.decode('utf-8').strip()
+                        if line_str.startswith('data: '):
+                            line_str = line_str[6:]
+                            if line_str == '[DONE]':
+                                break
+                            try:
+                                chunk_data = json.loads(line_str)
+                                if ('choices' in chunk_data and 
+                                    len(chunk_data['choices']) > 0 and
+                                    chunk_data['choices'][0].get('delta') and
+                                    'content' in chunk_data['choices'][0]['delta']):
+                                    content = chunk_data['choices'][0]['delta']['content']
+                                    yield content
+                            except json.JSONDecodeError:
+                                logging.warning(f"无法解析 DeepSeek 流式响应: {line_str}")
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"调用 DeepSeek 代理失败: {e}")
+            yield f"[后端代理错误: {str(e)}]"
+        except Exception as e:
+            logging.error(f"处理 DeepSeek 流时出错: {e}")
+            yield f"[后端内部错误: {str(e)}]"
+    
+    def _call_ali_proxy(data):
+        """调用代理的 Ali (Doubao) API"""
+        try:
+            # 阿里云通义千问的 API 格式可能有所不同
+            url = f"{ALI_TARGET_URL}/v1/chat/completions"
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {ALI_API_KEY}'
+            }
+            
+            # 构建请求体
+            messages = []
+            if data.get('systemInstruction'):
+                messages.append({"role": "system", "content": data.get('systemInstruction')})
+            
+            # 添加历史消息
+            for item in data.get('history', []):
+                if item.get('role') and item.get('parts') and len(item.get('parts')) > 0:
+                    messages.append({
+                        "role": item.get('role'),
+                        "content": item.get('parts')[0].get('text')
+                    })
+            
+            # 添加用户消息
+            messages.append({"role": "user", "content": data.get('userPrompt')})
+            
+            payload = {
+                "model": ALI_MODEL,
+                "messages": messages,
+                "temperature": 0.7
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=180)
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if 'choices' in response_data and len(response_data['choices']) > 0:
+                return jsonify({"text": response_data['choices'][0]['message']['content']})
+            else:
+                raise ValueError("Invalid response format from Ali proxy")
+
+        except Exception as e:
+            logging.error(f"调用 Ali 代理失败: {e}")
+            raise
+    
+    def _stream_ali_proxy(user_prompt, system_instruction, history):
+        """流式调用代理的 Ali (Doubao) API"""
+        try:
+            # 阿里云通义千问的 API 格式可能有所不同
+            url = f"{ALI_TARGET_URL}/v1/chat/completions"
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {ALI_API_KEY}'
+            }
+            
+            # 构建请求体
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            
+            # 添加历史消息
+            for item in history:
+                if item.get('role') and item.get('parts') and len(item.get('parts')) > 0:
+                    messages.append({
+                        "role": item.get('role'),
+                        "content": item.get('parts')[0].get('text')
+                    })
+            
+            # 添加用户消息
+            messages.append({"role": "user", "content": user_prompt})
+            
+            payload = {
+                "model": ALI_MODEL,
+                "messages": messages,
+                "temperature": 0.7,
+                "stream": True
+            }
+            
+            with requests.post(url, headers=headers, json=payload, stream=True, timeout=180) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if line:
+                        line_str = line.decode('utf-8').strip()
+                        if line_str.startswith('data: '):
+                            line_str = line_str[6:]
+                            if line_str == '[DONE]':
+                                break
+                            try:
+                                chunk_data = json.loads(line_str)
+                                if ('choices' in chunk_data and 
+                                    len(chunk_data['choices']) > 0 and
+                                    chunk_data['choices'][0].get('delta') and
+                                    'content' in chunk_data['choices'][0]['delta']):
+                                    content = chunk_data['choices'][0]['delta']['content']
+                                    yield content
+                            except json.JSONDecodeError:
+                                logging.warning(f"无法解析 Ali 流式响应: {line_str}")
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"调用 Ali 代理失败: {e}")
+            yield f"[后端代理错误: {str(e)}]"
+        except Exception as e:
+            logging.error(f"处理 Ali 流时出错: {e}")
+            yield f"[后端内部错误: {str(e)}]"
+    
+    
+    if __name__ == '__main__':
+        # 注意: 环境变量 FLASK_APP=app.py
+        # 运行: flask run --port=5000
+        # (或在生产环境中使用 gunicorn)
+        app.run(debug=True, port=5000)

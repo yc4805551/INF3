@@ -476,7 +476,10 @@ def handle_generate_stream():
 def _call_gemini_openai_proxy(data):
     """通过 OpenAI 兼容端点调用 Gemini API (非流式)"""
     try:
-        url = f"{GEMINI_BASE_URL}/v1/chat/completions"
+        # --- [修复] 移除 base_url 末尾的斜杠，防止 // 出现 ---
+        base_url = GEMINI_BASE_URL.rstrip('/')
+        url = f"{base_url}/v1/chat/completions"
+        # --- [修复结束] ---
         headers = {
             'Content-Type': 'application/json',
             'x-goog-api-key': GEMINI_API_KEY # Gemini 使用 x-goog-api-key
@@ -519,7 +522,10 @@ def _call_gemini_openai_proxy(data):
 def _stream_gemini_openai_proxy(user_prompt, system_instruction, history):
     """通过 OpenAI 兼容端点流式调用 Gemini API"""
     try:
-        url = f"{GEMINI_BASE_URL}/v1/chat/completions"
+        # --- [修复] 移除 base_url 末尾的斜杠，防止 // 出现 ---
+        base_url = GEMINI_BASE_URL.rstrip('/')
+        url = f"{base_url}/v1/chat/completions"
+        # --- [修复结束] ---
         headers = {
             'Content-Type': 'application/json',
             'x-goog-api-key': GEMINI_API_KEY # Gemini 使用 x-goog-api-key

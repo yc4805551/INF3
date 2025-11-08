@@ -47,7 +47,7 @@ INGEST_WORKERS = int(os.getenv("INGEST_WORKERS", 8))
 # Gemini 配置 (使用 OpenAI 兼容模式)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai" # 使用您找到的官方地址
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") # 默认使用 flash
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-2.5-flash") # 默认使用 flash
 
 # OpenAI 代理配置
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy-key-for-proxy")

@@ -476,13 +476,15 @@ def handle_generate_stream():
 def _call_gemini_openai_proxy(data):
     """通过 OpenAI 兼容端点调用 Gemini API (非流式)"""
     try:
-        # --- [修复] 移除 base_url 末尾的斜杠，防止 // 出现 ---
+        # [修复 1] 移除 base_url 末尾的斜杠，防止 // 出现
         base_url = GEMINI_BASE_URL.rstrip('/')
         url = f"{base_url}/v1/chat/completions"
-        # --- [修复结束] ---
+        
+        # [修复 2] 更改为 OpenAI 兼容的 Authorization Header
         headers = {
             'Content-Type': 'application/json',
-            'x-goog-api-key': GEMINI_API_KEY # Gemini 使用 x-goog-api-key
+            'Authorization': f'Bearer {GEMINI_API_KEY}'
+            # 'x-goog-api-key': GEMINI_API_KEY  <-- (这是错误的)
         }
         
         # 构建请求体
@@ -522,13 +524,15 @@ def _call_gemini_openai_proxy(data):
 def _stream_gemini_openai_proxy(user_prompt, system_instruction, history):
     """通过 OpenAI 兼容端点流式调用 Gemini API"""
     try:
-        # --- [修复] 移除 base_url 末尾的斜杠，防止 // 出现 ---
+        # [修复 1] 移除 base_url 末尾的斜杠，防止 // 出现
         base_url = GEMINI_BASE_URL.rstrip('/')
         url = f"{base_url}/v1/chat/completions"
-        # --- [修复结束] ---
+        
+        # [修复 2] 更改为 OpenAI 兼容的 Authorization Header
         headers = {
             'Content-Type': 'application/json',
-            'x-goog-api-key': GEMINI_API_KEY # Gemini 使用 x-goog-api-key
+            'Authorization': f'Bearer {GEMINI_API_KEY}'
+            # 'x-goog-api-key': GEMINI_API_KEY <-- (这是错误的)
         }
         
         # 构建请求体

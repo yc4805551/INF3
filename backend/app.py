@@ -474,20 +474,20 @@ def handle_generate_stream():
 # --- 关键变更：添加新的 Gemini OpenAI 兼容函数 ---
 
 def _call_gemini_openai_proxy(data):
-    """通过 OpenAI 兼容端点调用 Gemini API (非流式)"""
+    """通过 OpenAI 兼容端点调用 Gemini API (非流式) - 附带增强的错误日志"""
+    
+    # [修复 1] 移除 base_url 末尾的斜杠
+    base_url = GEMINI_BASE_URL.rstrip('/')
+    url = f"{base_url}/v1/chat/completions"
+    
+    # [修复 2] 确保使用 Authorization Header
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {GEMINI_API_KEY}'
+    }
+    
     try:
-        # [修复 1] 移除 base_url 末尾的斜杠，防止 // 出现
-        base_url = GEMINI_BASE_URL.rstrip('/')
-        url = f"{base_url}/v1/chat/completions"
-        
-        # [修复 2] 更改为 OpenAI 兼容的 Authorization Header
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {GEMINI_API_KEY}'
-            # 'x-goog-api-key': GEMINI_API_KEY  <-- (这是错误的)
-        }
-        
-        # 构建请求体
+        # 构建请求体 (保持不变)
         messages = []
         if data.get('systemInstruction'):
             messages.append({"role": "system", "content": data.get('systemInstruction')})
@@ -507,18 +507,40 @@ def _call_gemini_openai_proxy(data):
             "temperature": 0.7
         }
         
+        # 发起请求
         response = requests.post(url, headers=headers, json=payload, timeout=180)
+        
+        # 检查响应状态码 (400 错误会在这里触发)
         response.raise_for_status()
+        
         response_data = response.json()
         
         if 'choices' in response_data and len(response_data['choices']) > 0:
-            # 返回原始 JSON 字符串 (由 Gemini 生成)
             return Response(response_data['choices'][0]['message']['content'], content_type='application/json')
         else:
             raise ValueError("Invalid response format from Gemini OpenAI proxy")
-    
+
+    # --- [关键：增强的错误处理] ---
+    except requests.exceptions.HTTPError as http_err:
+        # 捕获 HTTP 错误 (例如 400, 401, 404, 500)
+        error_content = "No error body"
+        try:
+            # 尝试解析 Google 返回的 JSON 错误详情
+            error_content = http_err.response.json()
+        except json.JSONDecodeError:
+            # 如果返回的不是 JSON (例如 HTML)，则记录原始文本
+            error_content = http_err.response.text
+            
+        logging.error(f"调用 Gemini OpenAI 代理失败 (HTTPError): {http_err}")
+        logging.error(f"    URL: {url}")
+        logging.error(f"    Model: {GEMINI_MODEL}") # 打印正在使用的模型
+        # !!! 下面这行日志是解决问题的关键 !!! 
+        logging.error(f"    Response Body: {error_content}")
+        raise http_err # 重新抛出异常，让 Flask 返回 500
+        
     except Exception as e:
-        logging.error(f"调用 Gemini OpenAI 代理失败: {e}")
+        # 捕获其他错误 (例如连接超时)
+        logging.error(f"调用 Gemini OpenAI 代理时发生意外错误: {e}")
         raise
 
 def _stream_gemini_openai_proxy(user_prompt, system_instruction, history):

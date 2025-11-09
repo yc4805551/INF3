@@ -4,7 +4,7 @@
 app = "inf3"
 
 # 您可以选择一个离您或您的用户更近的区域, 例如 "hkg" (香港) 或 "nrt" (东京)
-primary_region = "hkg" 
+primary_region = "sjc" 
 
 [build]
   # 关键修复：
